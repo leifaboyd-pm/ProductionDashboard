@@ -4141,7 +4141,7 @@ function showLeifPrompt(){
   modal.innerHTML=`<div style="background:var(--card);border-radius:16px;max-width:560px;width:100%;max-height:84vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.25);">
     <div style="padding:20px 24px;border-bottom:1px solid var(--border);">
       <div style="font-size:17px;font-weight:800;">Confirm Leif Potter referrals</div>
-      <div style="font-size:13px;color:var(--text-secondary);margin-top:3px;">Leif originates for new hires. For each referred loan, confirm whether credit goes to the referrer or stays as Leif's own production. Your choice is remembered — you won't be asked again for these loans.</div>
+      <div style="font-size:13px;color:var(--text-secondary);margin-top:3px;">Leif originates for new hires, so referred loans are credited to the referrer by default. Confirm each one below, or reclaim it if it is genuinely Leif's own production. Your choice is remembered and you won't be asked again for these loans.</div>
     </div>
     <div style="padding:6px 24px;overflow-y:auto;">${rows}</div>
     <div style="padding:16px 24px;border-top:1px solid var(--border);display:flex;justify-content:space-between;gap:10px;align-items:center;">
@@ -4304,9 +4304,11 @@ async function processExcelFile(file) {
 }
 
 // ── Loan credit attribution ──
-// David Arvidson and Rachael Gaines are never credited as the producer.
-// When either is the Owner, credit the person in "Referred By", then fall back
-// to the next obvious column. Spelling-tolerant matching.
+// RULE: Referred By (TL/OS) always wins when present. LOs originate under a
+// transition LO's name, so the Owner column is NOT the producer — the person
+// in Referred By is. Only when Referred By is blank does credit fall back to
+// the Owner (name on file). David Arvidson and Rachael Gaines are never
+// credited as the producer. Spelling-tolerant matching.
 const NON_PRODUCERS = ['david arvidson','rachael gaines','raechel gaines','david arbinson','rachel gaines'];
 function isNonProducer(name){
   if(!name) return false;
@@ -4314,10 +4316,12 @@ function isNonProducer(name){
 }
 function creditedLO(owner, referredBy, productionAssistant){
   const own = (owner||'').toString().trim();
-  if(!isNonProducer(own)) return own || 'Unknown LO';
-  // Owner is a non-producer — find someone else
   const ref = (referredBy||'').toString().trim();
+  // 1) Referred By always wins when present
   if(ref && !isNonProducer(ref)) return ref;
+  // 2) No usable Referred By — default to the name on the file
+  if(!isNonProducer(own)) return own || 'Unknown LO';
+  // 3) Owner is a non-producer and no usable referrer — try Production Assistant
   const pa = (productionAssistant||'').toString().trim();
   if(pa && !isNonProducer(pa)) return pa;
   // Nothing usable — keep the owner rather than inventing a name, but flag it
@@ -4326,9 +4330,9 @@ function creditedLO(owner, referredBy, productionAssistant){
 
 // ── Leif Potter transition-LO handling ──
 // Leif does his own production AND originates for new hires. Loans of his that carry a
-// Referred By may belong to the referrer. We NEVER auto-move them — Leif keeps them by
-// default. Each such loan is queued for a one-time manual confirmation; once decided,
-// the choice is remembered per-loan (currentData.leifDecisions) and never asked again.
+// Referred By are credited to the referrer by default (Referred By always wins). Each
+// such loan is queued for a one-time confirmation so genuinely-Leif production can be
+// reclaimed; once decided, the choice is remembered per-loan (currentData.leifDecisions).
 const LEIF_NAMES = ['leif potter'];
 function isLeif(name){ return name && LEIF_NAMES.includes(String(name).trim().toLowerCase()); }
 // Stable per-loan key: prefer loanId, else losFileName, else client+amount
@@ -4351,7 +4355,9 @@ function applyLeifRule(l){
     return isNonProducer(ref) ? 'Unassigned (needs review)' : ref;
   }
   if(decided === 'leif') return 'Leif Potter';
-  // Undecided: if referrer is a non-producer, pause for review; otherwise queue confirmation, default Leif
+  // Undecided: Referred By wins by default. If referrer is a non-producer, pause for review;
+  // otherwise credit the referrer immediately and queue a one-time confirmation so a loan
+  // that is genuinely Leif's own production can be reclaimed.
   if(isNonProducer(ref)){
     if(!LEIF_PENDING[key]) LEIF_PENDING[key]={key, clientName:l.clientName, referredBy:ref, loanAmount:l.loanAmount, nonProducer:true};
     scheduleLeifPrompt();
@@ -4359,7 +4365,7 @@ function applyLeifRule(l){
   }
   if(!LEIF_PENDING[key]) LEIF_PENDING[key]={key, clientName:l.clientName, referredBy:ref, loanAmount:l.loanAmount, nonProducer:false};
   scheduleLeifPrompt();
-  return 'Leif Potter'; // default until confirmed
+  return ref; // default: credit the referrer until confirmed otherwise
 }
 let _leifPromptTimer=null;
 function scheduleLeifPrompt(){ if(!window._adminUnlocked) return; if(_leifPromptTimer) return; _leifPromptTimer=setTimeout(()=>{ _leifPromptTimer=null; showLeifPrompt(); }, 700); }
@@ -4375,7 +4381,17 @@ const CREDIT_FIX = {
 function reattributeStoredCredits(){
   let fixed = 0;
   const fixLoan = (l)=>{
-    if(!l || !isNonProducer(l.loName)) return;
+    if(!l) return;
+    // Universal rule: Referred By wins. Fix any stored loan filed under the wrong name.
+    // Leif-owned loans are handled by applyLeifRule at render (honors saved decisions).
+    if(!isLeif(l.owner)){
+      const liveRef = (l.referredBy||'').toString().trim();
+      if(liveRef && !isNonProducer(liveRef) && l.loName !== liveRef){
+        l.loName = liveRef; fixed++;
+        return;
+      }
+    }
+    if(!isNonProducer(l.loName)) return;
     let credited = null;
     // 1) try live referrer fields if present
     if(l.referredBy && !isNonProducer(l.referredBy)) credited = l.referredBy.toString().trim();
@@ -5059,8 +5075,9 @@ function filterData(data, filters){
   
   if(filters.loFilter !== 'All') f = f.filter(l => l.loName === filters.loFilter);
   
-  // Credit correction — David Arvidson / Rachael Gaines are never the producer.
-  // Remap their loans to the correct LO on every render (KPIs, charts, leaderboard all flow through here).
+  // Credit correction — Referred By always wins when present, and David Arvidson /
+  // Rachael Gaines are never the producer. Remap on every render (KPIs, charts,
+  // leaderboard all flow through here).
   const unresolved = [];
   f = f.map(l => {
     let cur = l;
@@ -5068,6 +5085,10 @@ function filterData(data, filters){
     if(isLeif(cur.owner) && (cur.referredBy||'').toString().trim()){
       const leifTo = applyLeifRule(cur);
       if(leifTo !== cur.loName) cur = {...cur, loName: leifTo};
+    } else {
+      // Universal rule: if the loan carries a Referred By, that person gets the credit
+      const ref = (cur.referredBy||'').toString().trim();
+      if(ref && !isNonProducer(ref) && cur.loName !== ref) cur = {...cur, loName: ref};
     }
     // David Arvidson / Rachael Gaines are never the producer — resolve to the real LO
     if(isNonProducer(cur.loName)){
@@ -5419,21 +5440,10 @@ async function handleStatusScreenshot(event) {
 
     const mediaType = file.type || 'image/png';
 
-    let apiKey = getAnthropicKey();
-    if(!apiKey) {
-      showStatus('warning', '<strong>API key needed.</strong> Enter your Anthropic API key below to enable screenshot import.');
-      const keyEl = $('apiKeyInput');
-      if(keyEl) keyEl.parentElement.style.display = 'flex';
-      return;
-    }
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const response = await fetch('https://pm-gateway.partnersmortgage88.workers.dev/anthropic', {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true'
+        'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         model: VISION_MODEL,
