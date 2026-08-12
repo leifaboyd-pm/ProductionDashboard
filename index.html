@@ -1316,7 +1316,7 @@ nav.mobile-tabs {
     <div class="pm-ticker" id="pmTicker" aria-label="Live performance ticker" title="Live performance — top producers across every category">
       <div class="pm-ticker-badge"><span class="pm-ticker-dot live-dot"></span>LIVE</div>
       <div class="pm-ticker-viewport"><div class="pm-ticker-track" id="pmTickerTrack"></div></div>
-      <span class="pm-build" title="App version — confirms this device is on the latest build">v27</span>
+      <span class="pm-build" title="App version — confirms this device is on the latest build">v28</span>
     </div>
 
     <!-- Scrollable content -->
@@ -2376,6 +2376,26 @@ function migrateSlide(s){
   return s;
 }
 
+// Build a pre-resolved feed for downstream consumers (e.g. the intranet). Funded loans carry
+// their FINAL producer credit (Leif rule + non-producer + manual reassignments already applied),
+// so consumers never have to replicate the dashboard's business logic.
+function buildPublishedFeed(){
+  const resolvedLoans = filterData(currentData.ytdData||[], {timePeriod:'YTD_2026', loFilter:'All'}).map(l=>({
+    fundingDate:l.fundingDate, loanAmount:l.loanAmount, loName:l.loName,
+    clientName:l.clientName, loanPurpose:l.loanPurpose,
+    loanNumber:l.loanNumber||'', loanId:l.loanId||'',
+    owner:l.owner||'', referredBy:l.referredBy||'', productionAssistant:l.productionAssistant||'',
+    interestRate:l.interestRate||0, lender:l.lender||'Partners Mortgage'
+  }));
+  const totals={};
+  resolvedLoans.forEach(l=>{ if(!l.loName || /unassigned/i.test(l.loName)) return; if(!totals[l.loName]) totals[l.loName]={name:l.loName,vol:0,units:0}; totals[l.loName].vol+=l.loanAmount; totals[l.loName].units++; });
+  const loSummaryYTD = Object.values(totals).sort((a,b)=>b.vol-a.vol);
+  const resolvedLeads=[]; Object.keys(currentData.monthlyLeads||{}).forEach(mk=>{ (currentData.monthlyLeads[mk]||[]).forEach(x=>resolvedLeads.push(x)); });
+  const pipeline = currentData.pipeline||[];
+  return { resolvedLoans, loSummaryYTD, resolvedLeads, pipeline,
+    counts:{ loans:resolvedLoans.length, leads:resolvedLeads.length, pipeline:pipeline.length, producers:loSummaryYTD.length } };
+}
+
 async function saveToCloud() {
   // Always save to localStorage first (fast)
   saveToLocalStorage();
@@ -2400,6 +2420,20 @@ async function saveToCloud() {
     };
     await db.collection('dashboard').doc('state').set(payload, { merge: true });
     console.log('☁️ Saved to Firestore');
+    // Publish a pre-resolved feed for downstream consumers (intranet). Independent of the main save.
+    try {
+      const feed = buildPublishedFeed();
+      await db.collection('dashboard').doc('published').set({
+        resolvedLoans: JSON.stringify(feed.resolvedLoans),
+        resolvedLeads: JSON.stringify(feed.resolvedLeads),
+        pipeline: JSON.stringify(feed.pipeline),
+        loSummaryYTD: JSON.stringify(feed.loSummaryYTD),
+        counts: feed.counts,
+        source: 'production-dashboard',
+        generatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      }, { merge: true });
+      console.log('☁️ Published feed updated', feed.counts);
+    } catch(e){ console.warn('⚠️ Published feed save failed:', e.message); }
   } catch(e) {
     console.warn('⚠️ Firestore save failed:', e.message);
   }
