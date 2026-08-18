@@ -2404,6 +2404,7 @@ async function saveToCloud() {
       creditOverrides: JSON.stringify(currentData.creditOverrides || {}),
       leifDecisions: JSON.stringify(currentData.leifDecisions || {}),
       loanReassignments: JSON.stringify(currentData.loanReassignments || {}),
+      deletedLoans: JSON.stringify(currentData.deletedLoans || {}),
       screenshotStatuses: JSON.stringify(currentData._screenshotStatuses || []),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedBy: navigator.userAgent.substring(0, 50)
@@ -2486,6 +2487,12 @@ async function loadFromCloud() {
     const cloudReassign = JSON.parse(d.loanReassignments || '{}');
     if(cloudReassign && Object.keys(cloudReassign).length){
       currentData.loanReassignments = Object.assign({}, currentData.loanReassignments, cloudReassign);
+      updated = true;
+    }
+    // Merge admin loan deletions (cloud wins on conflict)
+    const cloudDeleted = JSON.parse(d.deletedLoans || '{}');
+    if(cloudDeleted && Object.keys(cloudDeleted).length){
+      currentData.deletedLoans = Object.assign({}, currentData.deletedLoans, cloudDeleted);
       updated = true;
     }
     if(cloudScreenshot.length > 0) currentData._screenshotStatuses = cloudScreenshot;
@@ -3478,6 +3485,7 @@ let currentData = {
   creditOverrides: {}, // { 'clientname': 'Assigned LO' } — manual fixes for David/Rachael loans, persisted to Firebase
   leifDecisions: {}, // { 'loankey': 'referred'|'leif' } — per-loan confirmations for Leif Potter referred loans
   loanReassignments: {}, // { 'loankey': 'Assigned LO' } — manual per-loan credit overrides, persisted to Firebase
+  deletedLoans: {}, // { 'loankey': {clientName, loanAmount, fundingDate, loName, deletedAt} } — admin-deleted loans, hidden everywhere, survive re-uploads, persisted to Firebase
   pipelineUpdatedAt: 0, // timestamp of last pipeline upload — newer snapshot wins over bigger
   tvSlides: [], // break-room full-screen slides (birthdays etc.) for Modular TV mode
   currentView: 'dashboard'
@@ -3887,20 +3895,23 @@ function showProducerLoans(name){
         ${los.map(n=>`<option value="${_esc(n)}"${n===curOverride?' selected':''}>${_esc(n)}</option>`).join('')}
         <option value="__custom__">Other (type name)…</option>
       </select>` : '';
-    return `<div style="display:grid;grid-template-columns:1fr ${admin?'200px':'0px'};gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);">
-      <div>
+    const delBtn = admin ? `<button class="prod-del btn" data-delkey="${_esc(key)}" onclick="toggleLoanDelete(this)" title="Delete this loan from the dashboard" style="padding:6px 10px;font-size:11.5px;color:#B23B3B;border-color:rgba(178,59,59,0.35);">Delete</button>` : '';
+    return `<div class="prod-row" data-rowkey="${_esc(key)}" style="display:grid;grid-template-columns:1fr ${admin?'200px 64px':'0px'};gap:12px;align-items:center;padding:10px 0;border-bottom:1px solid var(--border);">
+      <div class="prod-row-info">
         <div style="font-weight:600;font-size:13.5px;">${_esc(l.clientName||'(no client name)')} <span style="color:var(--text-tertiary);font-weight:500;">${l.loanAmount?fmtK(l.loanAmount):''}</span></div>
         <div style="font-size:11.5px;color:var(--text-secondary);">${meta}</div>
         ${ctx}
       </div>
       ${control}
+      ${delBtn}
     </div>`;
   }).join('') || `<div style="padding:16px 0;color:var(--text-tertiary);font-size:13px;">No loans credited to ${_esc(name)} in this period.</div>`;
 
+  const delCount = Object.keys(currentData.deletedLoans||{}).length;
   const footer = admin
-    ? `<div style="padding:16px 24px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;">
-         <div style="font-size:11.5px;color:var(--text-tertiary);">Saved for all future uploads.</div>
-         <div style="display:flex;gap:10px;"><button class="btn" onclick="dismissProducerLoans()">Close</button><button class="btn btn-primary" onclick="saveProducerReassignments()">Save Reassignments</button></div>
+    ? `<div style="padding:16px 24px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+         <div style="font-size:11.5px;color:var(--text-tertiary);">Saved for all future uploads.${delCount?` <button style="background:none;border:none;color:var(--teal);font-size:11.5px;cursor:pointer;padding:0;text-decoration:underline;font-family:inherit;" onclick="showDeletedLoans()">Deleted loans (${delCount})</button>`:''}</div>
+         <div style="display:flex;gap:10px;"><button class="btn" onclick="dismissProducerLoans()">Close</button><button class="btn btn-primary" onclick="saveProducerReassignments()">Save Changes</button></div>
        </div>`
     : `<div style="padding:16px 24px;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
          <div style="display:flex;align-items:center;gap:8px;">
@@ -3992,11 +4003,82 @@ function unlockReassign(){
   if(inp.value===EXECUTIVE_PIN){ window._adminUnlocked=true; showToast('Reassignment unlocked'); showProducerLoans(_producerDrawerName); }
   else { showToast('Incorrect PIN', true); inp.value=''; inp.focus(); }
 }
+// Toggle a loan row between kept and marked-for-deletion (applied on Save)
+function toggleLoanDelete(btn){
+  const row = btn.closest('.prod-row'); if(!row) return;
+  const marked = row.getAttribute('data-marked') === '1';
+  if(marked){
+    row.setAttribute('data-marked','0');
+    row.style.opacity=''; const info=row.querySelector('.prod-row-info'); if(info) info.style.textDecoration='';
+    btn.textContent='Delete'; btn.style.color='#B23B3B'; btn.style.borderColor='rgba(178,59,59,0.35)'; btn.style.background='';
+  } else {
+    row.setAttribute('data-marked','1');
+    row.style.opacity='0.55'; const info=row.querySelector('.prod-row-info'); if(info) info.style.textDecoration='line-through';
+    btn.textContent='Undo'; btn.style.color='#fff'; btn.style.borderColor='#B23B3B'; btn.style.background='#B23B3B';
+  }
+}
+// List every deleted loan with a Restore button
+function showDeletedLoans(){
+  if(window._adminUnlocked !== true) return;
+  const entries = Object.entries(currentData.deletedLoans||{});
+  const existing=document.getElementById('deletedModal'); if(existing) existing.remove();
+  const rows = entries.map(([key,rec])=>{
+    rec = rec || {};
+    const when = rec.deletedAt ? new Date(rec.deletedAt).toLocaleDateString() : '';
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--border);">
+      <div>
+        <div style="font-weight:600;font-size:13.5px;">${_esc(rec.clientName||'(no client name)')} <span style="color:var(--text-tertiary);font-weight:500;">${rec.loanAmount?fmtK(rec.loanAmount):''}</span></div>
+        <div style="font-size:11.5px;color:var(--text-secondary);">${_esc(rec.loName||'')}${rec.fundingDate?(' · '+_esc(toDateStr(rec.fundingDate)||'')):''}${when?(' · deleted '+when):''}</div>
+      </div>
+      <button class="btn" style="padding:6px 12px;font-size:12px;" onclick="restoreDeletedLoan('${_esc(key)}')">Restore</button>
+    </div>`;
+  }).join('') || `<div style="padding:16px 0;color:var(--text-tertiary);font-size:13px;">No deleted loans.</div>`;
+  const modal=document.createElement('div');
+  modal.id='deletedModal';
+  modal.style.cssText='position:fixed;inset:0;background:rgba(15,23,33,0.45);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px;';
+  modal.innerHTML=`
+    <div style="background:#fff;border-radius:16px;max-width:520px;width:100%;max-height:80vh;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,0.25);" onclick="event.stopPropagation()">
+      <div style="padding:20px 24px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:12px;">
+        <div style="font-size:16px;font-weight:800;">Deleted Loans <span style="color:var(--text-tertiary);font-weight:600;font-size:13px;">— hidden from all reports</span></div>
+        <button class="btn" onclick="dismissDeletedLoans()" style="padding:4px 10px;font-size:16px;line-height:1;">×</button>
+      </div>
+      <div style="padding:8px 24px;overflow-y:auto;">${rows}</div>
+      <div style="padding:14px 24px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;"><button class="btn" onclick="dismissDeletedLoans()">Close</button></div>
+    </div>`;
+  modal.onclick=function(){ dismissDeletedLoans(); };
+  document.body.appendChild(modal);
+}
+function dismissDeletedLoans(){ const m=document.getElementById('deletedModal'); if(m) m.remove(); }
+async function restoreDeletedLoan(key){
+  if(!key || !currentData.deletedLoans || !currentData.deletedLoans[key]) return;
+  delete currentData.deletedLoans[key];
+  try{ await saveToCloud(); }catch(e){}
+  const f=filterData(currentData.ytdData, currentData.filters);
+  updateKPIs(f); updateCharts(f); updateLeaderboard(f); updateBanner(currentData.filters.timePeriod, f.length);
+  showToast('Loan restored');
+  showDeletedLoans();
+}
 async function saveProducerReassignments(){
+  // 1) process rows marked for deletion
+  let deleted=0;
+  document.querySelectorAll('#producerModal .prod-row[data-marked="1"]').forEach(row=>{
+    const key=row.getAttribute('data-rowkey'); if(!key) return;
+    if(!currentData.deletedLoans) currentData.deletedLoans={};
+    if(!currentData.deletedLoans[key]){
+      const src = (Array.isArray(_lbData) && _lbData.length) ? _lbData : filterData(currentData.ytdData, currentData.filters);
+      const loan = src.find(l=>reassignKey(l)===key) || {};
+      currentData.deletedLoans[key]={ clientName:loan.clientName||'', loanAmount:loan.loanAmount||0, fundingDate:loan.fundingDate||'', loName:loan.loName||_producerDrawerName, deletedAt:Date.now() };
+      deleted++;
+    }
+    // a deleted loan needs no overrides
+    if(currentData.loanReassignments && currentData.loanReassignments[key]) delete currentData.loanReassignments[key];
+  });
+  // 2) process reassignments (skip rows being deleted)
   const sels=document.querySelectorAll('#producerModal .prod-pick');
   let changed=0;
   sels.forEach(sel=>{
     const key=sel.getAttribute('data-key'); if(!key) return;
+    if(currentData.deletedLoans && currentData.deletedLoans[key]) return;
     const leifkey=sel.getAttribute('data-leifkey')||'';
     const val=(sel.value||'').trim();
     const cur=(currentData.loanReassignments&&currentData.loanReassignments[key])||'';
@@ -4012,7 +4094,10 @@ async function saveProducerReassignments(){
   const f=filterData(currentData.ytdData, currentData.filters);
   updateKPIs(f); updateCharts(f); updateLeaderboard(f); updateBanner(currentData.filters.timePeriod, f.length);
   if(typeof updatePipelineKPIs==='function'){ try{ updatePipelineKPIs(); }catch(e){} }
-  showToast(changed?`Saved ${changed} reassignment${changed===1?'':'s'}`:'No changes');
+  const bits=[];
+  if(changed) bits.push(`${changed} reassignment${changed===1?'':'s'}`);
+  if(deleted) bits.push(`${deleted} loan${deleted===1?'':'s'} deleted`);
+  showToast(bits.length?('Saved '+bits.join(', ')):'No changes');
   dismissProducerLoans();
 }
 
@@ -4985,6 +5070,7 @@ function saveToLocalStorage(){
     creditOverrides:currentData.creditOverrides||{},
     leifDecisions:currentData.leifDecisions||{},
     loanReassignments:currentData.loanReassignments||{},
+    deletedLoans:currentData.deletedLoans||{},
     monthlyProduction:currentData.monthlyProduction,
     lockedMonths:currentData.lockedMonths,
     filters:currentData.filters,
@@ -5068,6 +5154,10 @@ function filterData(data, filters){
   // Credit correction — Referred By always wins when present, and David Arvidson /
   // Rachael Gaines are never the producer. Remap on every render (KPIs, charts,
   // leaderboard all flow through here).
+  // Admin-deleted loans are hidden everywhere (KPIs, charts, leaderboard, published feed)
+  if(currentData.deletedLoans && Object.keys(currentData.deletedLoans).length){
+    f = f.filter(l => !currentData.deletedLoans[reassignKey(l)]);
+  }
   const unresolved = [];
   f = f.map(l => {
     let cur = l;
@@ -6517,6 +6607,7 @@ document.addEventListener('DOMContentLoaded',function(){
         currentData.creditOverrides=d.creditOverrides||{};
         currentData.leifDecisions=d.leifDecisions||{};
         currentData.loanReassignments=d.loanReassignments||{};
+        currentData.deletedLoans=d.deletedLoans||{};
         try { const ts=localStorage.getItem('pm_tvSlides'); if(ts){ const arr=JSON.parse(ts)||[]; currentData.tvSlides=Array.isArray(arr)?arr.map(migrateSlide):[]; } } catch(e){}
         currentData.goals=d.goals||currentData.goals;
         currentData.monthlyProduction=d.monthlyProduction||{};
